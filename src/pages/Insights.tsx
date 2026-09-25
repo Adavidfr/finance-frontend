@@ -25,7 +25,11 @@ export default function Insights() {
       if (newInsights.length === 0) {
         setError('No hay cambios significativos este mes todavía para generar un insight nuevo.')
       } else {
-        setInsights((prev) => [...newInsights, ...prev])
+        setInsights((prev) => {
+          const newIds = new Set(newInsights.map((i) => i.id))
+          const rest = prev.filter((i) => !newIds.has(i.id))
+          return [...newInsights, ...rest]
+        })
       }
     } catch {
       setError('No se pudieron generar insights nuevos.')

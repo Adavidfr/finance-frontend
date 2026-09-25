@@ -5,6 +5,7 @@ import AddTransactionModal from '../components/AddTransactionModal'
 import EditTransactionModal from '../components/EditTransactionModal'
 import {
   getTransactions,
+  getTransactionById,
   getCategories,
   updateTransactionCategory,
   confirmTransaction,
@@ -15,6 +16,7 @@ import type { Transaction, Category } from '../types/transaction'
 import type { Account } from '../types/account'
 
 const PAGE_SIZE = 25
+const MAX_POLL_ATTEMPTS = 8 // ~12 segundos a 1.5s por intento, luego se rinde
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -29,9 +31,47 @@ export default function Transactions() {
   const [totalCount, setTotalCount] = useState(0)
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
 
+  // Map de id -> número de intentos de polling ya hechos para esa transacción
+  const [pendingIds, setPendingIds] = useState<Map<number, number>>(new Map())
+
   useEffect(() => {
     loadData(page)
   }, [page])
+
+  useEffect(() => {
+    if (pendingIds.size === 0) return
+
+    const interval = setInterval(async () => {
+      const ids = Array.from(pendingIds.keys())
+      const results = await Promise.all(ids.map((id) => getTransactionById(id)))
+
+      setTransactions((prev) =>
+        prev.map((tx) => results.find((r) => r.id === tx.id) ?? tx)
+      )
+
+      setPendingIds((prev) => {
+        const next = new Map(prev)
+        results.forEach((r) => {
+          if (r.categorization_method !== 'pending') {
+            // Ya se categorizó (regla o LLM): deja de vigilarla
+            next.delete(r.id)
+            return
+          }
+          const attempts = (next.get(r.id) ?? 0) + 1
+          if (attempts >= MAX_POLL_ATTEMPTS) {
+            // Se agotaron los intentos: se rinde y deja la categorización
+            // en manos del usuario (el selector se vuelve a mostrar)
+            next.delete(r.id)
+          } else {
+            next.set(r.id, attempts)
+          }
+        })
+        return next
+      })
+    }, 1500)
+
+    return () => clearInterval(interval)
+  }, [pendingIds])
 
   async function loadData(pageNumber: number) {
     setLoading(true)
@@ -45,6 +85,17 @@ export default function Transactions() {
       setTotalCount(txPage.count)
       if (!categories.length) setCategories(cats)
       if (!accounts.length) setAccounts(accs)
+
+      const stillPending = txPage.results.filter((tx) => tx.categorization_method === 'pending')
+      if (stillPending.length > 0) {
+        setPendingIds((prev) => {
+          const next = new Map(prev)
+          stillPending.forEach((tx) => {
+            if (!next.has(tx.id)) next.set(tx.id, 0)
+          })
+          return next
+        })
+      }
     } catch {
       setError('No se pudieron cargar las transacciones.')
     } finally {
@@ -57,6 +108,13 @@ export default function Transactions() {
     setTransactions((prev) =>
       prev.map((tx) => (tx.id === transactionId ? updated : tx))
     )
+    // Si el usuario categorizó a mano una que seguía "en observación", ya no hace falta vigilarla
+    setPendingIds((prev) => {
+      if (!prev.has(transactionId)) return prev
+      const next = new Map(prev)
+      next.delete(transactionId)
+      return next
+    })
   }
 
   async function handleConfirm(transactionId: number) {
@@ -66,23 +124,33 @@ export default function Transactions() {
     )
   }
 
-  function handleTransactionCreated() {
+  function handleTransactionCreated(newTx: Transaction) {
     if (page === 1) {
-      loadData(1)
+      setTransactions((prev) => [newTx, ...prev].slice(0, PAGE_SIZE))
+      setTotalCount((c) => c + 1)
     } else {
       setPage(1)
     }
+    setPendingIds((prev) => new Map(prev).set(newTx.id, 0))
   }
 
   function handleTransactionUpdated(updated: Transaction) {
     setTransactions((prev) => prev.map((tx) => (tx.id === updated.id ? updated : tx)))
     setEditingTransaction(null)
+    if (updated.categorization_method === 'pending') {
+      setPendingIds((prev) => new Map(prev).set(updated.id, 0))
+    }
   }
 
   async function handleDelete(id: number) {
     if (!confirm('¿Eliminar esta transacción?')) return
     await deleteTransaction(id)
-    // Si era la última de la página (y no es la página 1), retrocede una página
+    setPendingIds((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Map(prev)
+      next.delete(id)
+      return next
+    })
     if (transactions.length === 1 && page > 1) {
       setPage((p) => p - 1)
     } else {
@@ -137,6 +205,7 @@ export default function Transactions() {
                 key={tx.id}
                 transaction={tx}
                 categories={categories}
+                isPending={pendingIds.has(tx.id)}
                 onCategoryChange={handleCategoryChange}
                 onConfirm={handleConfirm}
                 onEdit={() => setEditingTransaction(tx)}
@@ -193,6 +262,7 @@ export default function Transactions() {
 function TransactionRow({
   transaction,
   categories,
+  isPending,
   onCategoryChange,
   onConfirm,
   onEdit,
@@ -200,6 +270,7 @@ function TransactionRow({
 }: {
   transaction: Transaction
   categories: Category[]
+  isPending: boolean
   onCategoryChange: (id: number, categoryId: number) => void
   onConfirm: (id: number) => void
   onEdit: () => void
@@ -209,24 +280,31 @@ function TransactionRow({
   const isExpense = amount < 0
 
   return (
-    <tr className="hover:bg-slate-50">
+    <tr className={`hover:bg-slate-50 ${isPending ? 'bg-amber-50/40' : ''}`}>
       <td className="px-4 py-3 text-slate-500">{transaction.date}</td>
       <td className="px-4 py-3 text-slate-800">{transaction.description}</td>
       <td className="px-4 py-3">
-        <select
-          value={transaction.category ?? ''}
-          onChange={(e) => onCategoryChange(transaction.id, Number(e.target.value))}
-          className="text-sm border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-700"
-        >
-          <option value="" disabled>
-            Sin categoría
-          </option>
-          {categories.map((cat) => (
-            <option key={cat.id} value={cat.id}>
-              {cat.name}
+        {isPending ? (
+          <span className="flex items-center gap-1.5 text-xs text-amber-600">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+            Categorizando...
+          </span>
+        ) : (
+          <select
+            value={transaction.category ?? ''}
+            onChange={(e) => onCategoryChange(transaction.id, Number(e.target.value))}
+            className="text-sm border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-700"
+          >
+            <option value="" disabled>
+              Sin categoría
             </option>
-          ))}
-        </select>
+            {categories.map((cat) => (
+              <option key={cat.id} value={cat.id}>
+                {cat.name}
+              </option>
+            ))}
+          </select>
+        )}
       </td>
       <td className="px-4 py-3">
         <MethodBadge method={transaction.categorization_method} />

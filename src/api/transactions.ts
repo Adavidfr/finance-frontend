@@ -49,3 +49,8 @@ export async function updateTransaction(
 export async function deleteTransaction(id: number): Promise<void> {
   await apiClient.delete(`/transactions/${id}/`)
 }
+
+export async function getTransactionById(id: number): Promise<Transaction> {
+  const response = await apiClient.get<Transaction>(`/transactions/${id}/`)
+  return response.data
+}
