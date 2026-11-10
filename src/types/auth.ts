@@ -1,9 +1,15 @@
 export interface LoginCredentials {
-  username: string
-  password: string
+  username: string;
+  password: string;
+}
+
+export interface RegisterData {
+  username: string;
+  email: string;
+  password: string;
 }
 
 export interface TokenResponse {
-  access: string
-  refresh: string
+  access: string;
+  refresh: string;
 }
